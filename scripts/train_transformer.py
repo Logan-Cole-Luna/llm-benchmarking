@@ -1,3 +1,5 @@
+import sys, os
+sys.path.append(os.path.join(os.path.dirname(__file__), '../'))
 import torch
 import torch.nn.functional as F
 import os
@@ -7,6 +9,7 @@ from config.config import default_config as config
 from src.models.transformer import Transformer
 from data_loader.data_loader import get_batch_iterator
 from typing import Dict
+from GGD import GGD
 
 # --- Initialize the Model and Print Parameters ---
 
@@ -24,8 +27,40 @@ print(f"Total number of parameters in the model: {total_params:,}")
 
 # --- Optimizer Setup and Loss Tracking ---
 
-# Set up the AdamW optimizer with the specified learning rate.
-optimizer = torch.optim.AdamW(model.parameters(), lr=config['t_lr'])
+optimizer_name = "GGD_LW"
+
+if optimizer_name == "GGD":
+    optimizer = GGD(
+            model.parameters(),
+            normalize=True,
+            layer_wise=False,
+            scale_aware=False,
+            scale_factor=0.2,
+            max_group_size=5000,
+            adaptive=True,
+            clip_norm=1.0#,
+            #**best_hyperparams
+        )
+elif optimizer_name == "SGD":
+        optimizer = torch.optim.SGD(model.parameters(), nesterov=True)#, **best_hyperparams)
+elif optimizer_name == "ADAM":
+        optimizer = torch.optim.Adam(model.parameters())#, **best_hyperparams)
+elif optimizer_name == "ADAMW":
+        #optimizer = torch.optim.AdamW(model.parameters(), **best_hyperparams)
+        # Set up the AdamW optimizer with the specified learning rate.
+        optimizer = torch.optim.AdamW(model.parameters(), lr=config['t_lr'])
+elif optimizer_name == "GGD_LW":
+    optimizer = GGD(
+        model.parameters(),
+        normalize=True,
+        layer_wise=True,
+        scale_aware=True,
+        scale_factor=0.2,
+        max_group_size=5000,
+        adaptive=True,
+        clip_norm=1.0#,
+        #**best_hyperparams
+    )
 
 # List to track loss values during training.
 losses = []
