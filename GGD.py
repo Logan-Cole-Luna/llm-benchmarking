@@ -35,6 +35,14 @@ class GGD(Optimizer):  # noqa: D101
         clip_norm: Optional[float] = None,
         adaptive: bool = False,
         adaptive_eps: float = 1e-8,
+        lamb: bool = False,    # <-- new parameter for LAMB-style update
+        # Second moment parameters - renamed for clearer understanding
+        use_second_moment: bool = False,  # Enable second moment tracking (renamed from use_adam for clarity)
+        betas: tuple = (0.9, 0.999),  # First and second moment coefficients
+        adamw_mode: bool = False,  # Use decoupled weight decay
+        # Additional control parameters
+        hybrid_mode: bool = False,  # Combine normalization with second moments
+        second_moment_factor: float = 0.5,  # Control blending of normalized and second-moment scaled updates
     ):
         """
         Implements Normalized Stochastic Gradient Descent (optionally with momentum).
@@ -63,6 +71,13 @@ class GGD(Optimizer):  # noqa: D101
             clip_norm (float, optional): Clip gradient norm value
             adaptive (bool): Use adaptive gradient scaling like RMSprop
             adaptive_eps (float): Small constant for adaptive scaling
+            lamb (bool): Enable LAMB-style trust ratio update
+            use_second_moment (bool): Enable second moment tracking for adaptive step sizes
+            betas (tuple): Coefficients for first and second moment estimates (β₁, β₂)
+            adamw_mode (bool): Use decoupled weight decay implementation (like AdamW)
+            hybrid_mode (bool): When True, combine normalized gradients with second-moment scaling
+            second_moment_factor (float): Controls the influence of second moments in hybrid mode 
+                                        (0.0 = fully normalized, 1.0 = fully second-moment scaled)
         """
         if isinstance(lr, Tensor) and lr.numel() != 1:
             raise ValueError("Tensor lr must be 1-element")
@@ -74,6 +89,10 @@ class GGD(Optimizer):  # noqa: D101
             raise ValueError(f"Invalid weight_decay value: {weight_decay}")
         if eps < 0.0:
             raise ValueError(f"Invalid epsilon value: {eps}")
+        if not 0.0 <= betas[0] < 1.0:
+            raise ValueError(f"Invalid beta parameter at index 0: {betas[0]}")
+        if not 0.0 <= betas[1] < 1.0:
+            raise ValueError(f"Invalid beta parameter at index 1: {betas[1]}")
 
         defaults = dict(
             lr=lr,
@@ -96,6 +115,13 @@ class GGD(Optimizer):  # noqa: D101
             clip_norm=clip_norm,
             adaptive=adaptive,
             adaptive_eps=adaptive_eps,
+            lamb=lamb,
+            # Updated naming
+            use_second_moment=use_second_moment,
+            betas=betas,
+            adamw_mode=adamw_mode,
+            hybrid_mode=hybrid_mode,
+            second_moment_factor=second_moment_factor,
         )
         if nesterov and (momentum <= 0 or dampening != 0):
             raise ValueError("Nesterov momentum requires a momentum and zero dampening")
@@ -172,6 +198,14 @@ class GGD(Optimizer):  # noqa: D101
             group.setdefault("clip_norm", None)
             group.setdefault("adaptive", False)
             group.setdefault("adaptive_eps", 1e-8)
+            group.setdefault("lamb", False)
+            # Updated naming with backward compatibility
+            use_adam = group.pop("use_adam", False) if "use_adam" in group else False
+            group.setdefault("use_second_moment", use_adam or False)
+            group.setdefault("betas", (0.9, 0.999))
+            group.setdefault("adamw_mode", False)
+            group.setdefault("hybrid_mode", False)
+            group.setdefault("second_moment_factor", 0.5)
 
     def _init_group(self, group, params, grads, momentum_buffer_list):
         has_sparse_grad = False
@@ -187,9 +221,18 @@ class GGD(Optimizer):  # noqa: D101
                 if p.grad.is_sparse:
                     has_sparse_grad = True
 
-                if group["momentum"] != 0:
+                if group["momentum"] != 0 and not group["use_second_moment"]:
                     state = self.state[p]
                     momentum_buffer_list.append(state.get("momentum_buffer"))
+
+                # Initialize second moment state if needed
+                if group["use_second_moment"] and len(self.state[p]) == 0:
+                    state = self.state[p]
+                    state["step"] = torch.tensor(0.0, dtype=torch.float32)
+                    # Exponential moving average of gradient values
+                    state["exp_avg"] = torch.zeros_like(p, memory_format=torch.preserve_format)
+                    # Exponential moving average of squared gradient values
+                    state["exp_avg_sq"] = torch.zeros_like(p, memory_format=torch.preserve_format)
 
                 # Setup adaptive scaling state if needed
                 if group["adaptive"] and "sum_sq_grad" not in self.state[p]:
@@ -221,35 +264,42 @@ class GGD(Optimizer):  # noqa: D101
             if group["normalize"]:
                 self._normalize_gradients(group, params, grads)
 
-            # Choose the appropriate optimization function based on foreach/fused
-            if group["foreach"] and not torch.jit.is_scripting():
+            # Choose update routine based on configuration
+            if group["use_second_moment"] and group["hybrid_mode"]:
+                self._hybrid_update(group, params, grads)
+            elif group["use_second_moment"]:
+                self._second_moment_update(group, params, grads)  # Renamed from _adam_update
+            elif group.get("lamb", False):
+                func = self._single_tensor_lamb_normalized_sgd
+            elif group["foreach"] and not torch.jit.is_scripting():
                 func = self._multi_tensor_normalized_sgd
             elif group["fused"] and not torch.jit.is_scripting():
                 func = self._fused_normalized_sgd
             else:
                 func = self._single_tensor_normalized_sgd
 
-            # Call the optimization function
-            func(
-                params,
-                grads,
-                momentum_buffer_list,
-                weight_decay=group["weight_decay"],
-                momentum=group["momentum"],
-                lr=group["lr"],
-                dampening=group["dampening"],
-                nesterov=group["nesterov"],
-                maximize=group["maximize"],
-                has_sparse_grad=has_sparse_grad,
-                adaptive=group["adaptive"],
-                adaptive_eps=group["adaptive_eps"],
-            )
+            # Call the optimization function if not using Adam
+            if not group["use_second_moment"]:
+                func(
+                    params,
+                    grads,
+                    momentum_buffer_list,
+                    weight_decay=group["weight_decay"],
+                    momentum=group["momentum"],
+                    lr=group["lr"],
+                    dampening=group["dampening"],
+                    nesterov=group["nesterov"],
+                    maximize=group["maximize"],
+                    has_sparse_grad=has_sparse_grad,
+                    adaptive=group["adaptive"],
+                    adaptive_eps=group["adaptive_eps"],
+                )
 
-            # Update momentum buffers in state
-            if group["momentum"] != 0:
-                for p, momentum_buffer in zip(params, momentum_buffer_list):
-                    state = self.state[p]
-                    state["momentum_buffer"] = momentum_buffer
+                # Update momentum buffers in state
+                if group["momentum"] != 0:
+                    for p, momentum_buffer in zip(params, momentum_buffer_list):
+                        state = self.state[p]
+                        state["momentum_buffer"] = momentum_buffer
 
         return loss
     
@@ -463,6 +513,59 @@ class GGD(Optimizer):  # noqa: D101
             # Use .data to avoid in-place operation on a leaf Variable that requires grad
             param.data.add_(grad, alpha=-lr)
 
+    def _single_tensor_lamb_normalized_sgd(
+        self,
+        params: List[Tensor],
+        grads: List[Tensor],
+        momentum_buffer_list: List[Optional[Tensor]],
+        *,
+        weight_decay: float,
+        momentum: float,
+        lr: float,
+        dampening: float,
+        nesterov: bool,
+        maximize: bool,
+        has_sparse_grad: bool,
+        adaptive: bool,
+        adaptive_eps: float,
+    ):
+        # LAMB-style update: apply trust ratio per parameter.
+        for i, param in enumerate(params):
+            grad = grads[i] if not maximize else -grads[i]
+
+            if weight_decay != 0:
+                grad = grad.add(param, alpha=weight_decay)
+
+            if momentum != 0:
+                buf = momentum_buffer_list[i]
+                if buf is None:
+                    buf = torch.clone(grad).detach()
+                    momentum_buffer_list[i] = buf
+                else:
+                    buf.mul_(momentum).add_(grad, alpha=1 - dampening)
+                if nesterov:
+                    grad = grad.add(buf, alpha=momentum)
+                else:
+                    grad = buf
+
+            if adaptive:
+                state = self.state[params[i]]
+                if 'sum_sq_grad' not in state:
+                    state['sum_sq_grad'] = grad.detach().pow(2)
+                else:
+                    state['sum_sq_grad'].add_(grad.detach().pow(2))
+                grad = grad / (state['sum_sq_grad'].sqrt() + adaptive_eps)
+
+            # LAMB trust ratio update: compute scaling factor
+            param_norm = param.data.norm()
+            grad_norm = grad.norm()
+            if param_norm > 0 and grad_norm > 0:
+                trust_ratio = param_norm / (grad_norm + weight_decay * param_norm)
+            else:
+                trust_ratio = 1.0
+
+            param.data.add_(grad, alpha=-lr * trust_ratio)
+
     def _multi_tensor_normalized_sgd(
         self,
         params: List[Tensor],
@@ -655,3 +758,132 @@ class GGD(Optimizer):  # noqa: D101
                     # Scale by inverse sqrt of sum - we have to do this individually
                     # since this isn't supported by foreach ops yet
                     device_grads[i] = device_grads[i] / (state['sum_sq_grad'].sqrt() + adaptive_eps)
+
+    def _second_moment_update(self, group, params, grads):
+        """
+        Perform update with second moment tracking (similar to Adam).
+        This combines adaptive learning rates with GGD's gradient normalization.
+        """
+        # Same implementation as before, just renamed from _adam_update
+        beta1, beta2 = group['betas']
+        eps = group['eps']
+        lr = group['lr']
+        weight_decay = group['weight_decay']
+        adamw_mode = group['adamw_mode']
+        maximize = group['maximize']
+        
+        for i, param in enumerate(params):
+            grad = grads[i] if not maximize else -grads[i]
+            
+            if len(param.shape) == 0:
+                continue
+                
+            state = self.state[param]
+            
+            # Get state variables
+            exp_avg = state['exp_avg']
+            exp_avg_sq = state['exp_avg_sq']
+            step = state['step']
+            
+            # Increment step
+            step += 1
+            state['step'] = step
+            
+            # Apply weight decay
+            if weight_decay != 0:
+                if adamw_mode:
+                    # AdamW-style decoupled weight decay
+                    param.data.mul_(1 - lr * weight_decay)
+                else:
+                    # Standard L2 regularization
+                    grad = grad.add(param, alpha=weight_decay)
+            
+            # Update biased first moment estimate
+            exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
+            
+            # Update biased second raw moment estimate
+            exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+            
+            # Bias correction
+            bias_correction1 = 1 - beta1 ** step.item()
+            bias_correction2 = 1 - beta2 ** step.item()
+            
+            # Compute bias-corrected learning rate
+            step_size = lr / bias_correction1
+            
+            # Compute square root of bias-corrected second moment estimate
+            denom = (exp_avg_sq.sqrt() / math.sqrt(bias_correction2)).add_(eps)
+            
+            # Update parameters
+            param.data.addcdiv_(exp_avg, denom, value=-step_size)
+    
+    def _hybrid_update(self, group, params, grads):
+        """
+        Hybrid update that combines normalized gradients with second moment adaptive scaling.
+        This allows a controlled blend between the two approaches.
+        """
+        beta1, beta2 = group['betas']
+        eps = group['eps']
+        lr = group['lr']
+        weight_decay = group['weight_decay']
+        adamw_mode = group['adamw_mode']
+        maximize = group['maximize']
+        factor = group['second_moment_factor']
+        
+        for i, param in enumerate(params):
+            grad = grads[i] if not maximize else -grads[i]
+            
+            if len(param.shape) == 0:
+                continue
+                
+            state = self.state[param]
+            
+            # Get state variables
+            exp_avg = state['exp_avg']
+            exp_avg_sq = state['exp_avg_sq']
+            step = state['step']
+            
+            # Increment step
+            step += 1
+            state['step'] = step
+            
+            # Apply weight decay
+            if weight_decay != 0:
+                if adamw_mode:
+                    # AdamW-style decoupled weight decay
+                    param.data.mul_(1 - lr * weight_decay)
+                else:
+                    # Standard L2 regularization
+                    grad = grad.add(param, alpha=weight_decay)
+            
+            # Update biased first moment estimate
+            exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
+            
+            # Update biased second raw moment estimate
+            exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+            
+            # Bias correction
+            bias_correction1 = 1 - beta1 ** step.item()
+            bias_correction2 = 1 - beta2 ** step.item()
+            
+            # Compute bias-corrected learning rate
+            step_size = lr / bias_correction1
+            
+            # Compute square root of bias-corrected second moment estimate
+            denom = (exp_avg_sq.sqrt() / math.sqrt(bias_correction2)).add_(eps)
+            
+            # HYBRID APPROACH: Combine normalized gradient with second-moment scaling
+            # When factor=0: fully normalized (already normalized in _normalize_gradients)
+            # When factor=1: fully second-moment scaled (like Adam)
+            if factor > 0:
+                # Calculate the Adam-style update
+                adam_update = exp_avg.div(denom).mul(-step_size)
+                
+                # For the normalized part, we use the already normalized gradient with a simple step size
+                norm_update = grad.mul(-lr)
+                
+                # Apply the hybrid update
+                param.data.add_(adam_update.mul(factor) + norm_update.mul(1-factor))
+            else:
+                # Just use the normalized gradient (which was already normalized)
+                param.data.add_(grad, alpha=-lr)
