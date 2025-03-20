@@ -34,9 +34,23 @@ OPTIMIZER_PARAMS = {
     "GGD": {"normalize": True, "layer_wise": False, "scale_aware": False, 
             "scale_factor": 0.2, "max_group_size": 5000, "adaptive": True, "clip_norm": 1.0,
             "momentum": 0.9, "adaptive_eps": 1e-8, "weight_decay": 0.0005, "lamb": True},
-    "GGD_LW": {"normalize": True, "layer_wise": True, "scale_aware": True, 
-               "scale_factor": 0.2, "max_group_size": 5000, "adaptive": True, "clip_norm": 1.0, 
-               "momentum": 0.9, "adaptive_eps": 1e-8, "weight_decay": 0.0005},
+    #"GGD_LW": {"normalize": True, "layer_wise": True, "scale_aware": True, 
+    #           "scale_factor": 0.2, "max_group_size": 5000, "adaptive": True, "clip_norm": 1.0, 
+    #           "momentum": 0.9, "adaptive_eps": 1e-8, "weight_decay": 0.0005},
+    
+    "GGD_LW": {
+        "lr": 0.1,
+        "normalize": True,
+        "layer_wise": True,
+        "scale_aware": False,
+        "max_group_size": 5000,
+        "adaptive": False,
+        "clip_norm": 0,  #// or use a higher value like 5.0 if clipping is desired
+        "momentum": 0.9,
+        "weight_decay": 0.0,
+        "nesterov": True  #// if your implementation supports it
+        },
+
     "GGD_HYBRID": {"lr": T_LR, "normalize": True, "layer_wise": True, "scale_aware": True, 
                   "scale_factor": 0.2, "use_second_moment": True, "hybrid_mode": True,
                   "second_moment_factor": 0.7, "betas": (0.9, 0.999), "adamw_mode": True,
