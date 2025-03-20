@@ -5,11 +5,13 @@ import torch.nn.functional as F
 import os
 from tqdm import tqdm
 import numpy as np
+import time
 from config.config import default_config as config
 from src.models.transformer import Transformer
 from data_loader.data_loader import get_batch_iterator
-from typing import Dict
+from typing import Dict, List, Tuple
 from GGD import GGD
+from utils.visualize import setup_visualization_dir, plot_seaborn_style, visualize_gradient_norms, save_experiment_results, GradientTracker
 
 # --- Initialize the Model and Print Parameters ---
 
@@ -25,42 +27,76 @@ model = Transformer(
 total_params = sum(p.numel() for p in model.parameters())
 print(f"Total number of parameters in the model: {total_params:,}")
 
+# --- Training metrics tracking ---
+metrics_data = {
+    'train_losses': [],
+    'dev_losses': [],
+    'eval_steps': [],
+    'wall_times': [],
+    'iteration_losses': []
+}
+
+# Initialize gradient tracker
+gradient_tracker = GradientTracker()
+
 # --- Optimizer Setup and Loss Tracking ---
 
-optimizer_name = "GGD_LW"
+optimizer_name = config['optimizer']
+optimizer_params = config['optimizer_params'][optimizer_name]
+
+print(f"Using optimizer: {optimizer_name} with parameters: {optimizer_params}")
 
 if optimizer_name == "GGD":
     optimizer = GGD(
             model.parameters(),
-            normalize=True,
-            layer_wise=False,
-            scale_aware=False,
-            scale_factor=0.2,
-            max_group_size=5000,
-            adaptive=True,
-            clip_norm=1.0#,
-            #**best_hyperparams
+            **optimizer_params
         )
 elif optimizer_name == "SGD":
-        optimizer = torch.optim.SGD(model.parameters(), nesterov=True)#, **best_hyperparams)
+    optimizer = torch.optim.SGD(model.parameters(), **optimizer_params)
 elif optimizer_name == "ADAM":
-        optimizer = torch.optim.Adam(model.parameters())#, **best_hyperparams)
+    optimizer = torch.optim.Adam(model.parameters(), **optimizer_params)
 elif optimizer_name == "ADAMW":
-        #optimizer = torch.optim.AdamW(model.parameters(), **best_hyperparams)
-        # Set up the AdamW optimizer with the specified learning rate.
-        optimizer = torch.optim.AdamW(model.parameters(), lr=config['t_lr'])
+    optimizer = torch.optim.AdamW(model.parameters(), **optimizer_params)
 elif optimizer_name == "GGD_LW":
     optimizer = GGD(
         model.parameters(),
-        normalize=True,
-        layer_wise=True,
-        scale_aware=True,
-        scale_factor=0.2,
-        max_group_size=5000,
-        adaptive=True,
-        clip_norm=1.0#,
-        #**best_hyperparams
+        **optimizer_params
     )
+elif optimizer_name == "GGD_HYBRID":
+    optimizer = GGD(
+            model.parameters(),
+            lr=config['t_lr'],
+            normalize=True,
+            layer_wise=True,
+            scale_aware=True,
+            scale_factor=0.2,
+            use_second_moment=True,
+            hybrid_mode=True,
+            second_moment_factor=0.7,  # Favor second moments for LLMs
+            betas=(0.9, 0.999),
+            adamw_mode=True,
+            eps=1e-8,
+            weight_decay=0.01,
+            clip_norm=1.0,
+            lamb=True  # LAMB is essential for transformers - helps with attention layer variations
+        )
+elif optimizer_name == "GGD_ADAM":
+    # Renamed for clarity but functionally equivalent to previous implementation
+    optimizer = GGD(
+            model.parameters(),
+            lr=config['t_lr'],
+            normalize=True,
+            layer_wise=True,
+            scale_aware=True, 
+            scale_factor=0.2,
+            use_second_moment=True,  # Previously use_adam
+            betas=(0.9, 0.999),
+            adamw_mode=True,
+            eps=1e-8,
+            weight_decay=0.01,
+            clip_norm=1.0,
+            lamb=True  # Enable LAMB for transformers
+        )
 
 # List to track loss values during training.
 losses = []
@@ -121,6 +157,14 @@ batch_iterator = get_batch_iterator(
     device=config['device']
 )
 
+# Create directories for results and visualizations
+results_dir = os.path.join(os.path.dirname(config['t_out_path']), "results")
+os.makedirs(results_dir, exist_ok=True)
+visuals_dir = setup_visualization_dir(os.path.dirname(config['t_out_path']))
+
+# Track start time for walltime tracking
+start_time = time.time()
+
 # Create a progress bar to monitor training progress.
 pbar = tqdm(range(config['t_train_steps']))
 for step in pbar:
@@ -133,11 +177,18 @@ for step in pbar:
 
         # Record the loss for tracking.
         losses.append(loss.item())
+        metrics_data['iteration_losses'].append(loss.item())
+        metrics_data['wall_times'].append(time.time() - start_time)
+        
         pbar.set_description(f"Train loss: {np.mean(losses[-AVG_WINDOW:]):.4f}")
 
         # Backpropagate the loss and update the model parameters.
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
+        
+        # Track gradients
+        gradient_tracker.update(model)
+        
         optimizer.step()
 
         # Periodically evaluate the model on training and development data.
@@ -146,6 +197,11 @@ for step in pbar:
             train_loss = evaluation_losses['train']
             dev_loss = evaluation_losses['dev']
             print(f"Step: {step}, Train loss: {train_loss:.4f}, Dev loss: {dev_loss:.4f}")
+            
+            # Record evaluation metrics
+            metrics_data['train_losses'].append(train_loss)
+            metrics_data['dev_losses'].append(dev_loss)
+            metrics_data['eval_steps'].append(step)
 
         # Decay the learning rate at the specified step.
         if step == config['t_lr_decay_step']:
@@ -187,5 +243,87 @@ torch.save(
     },
     modified_model_out_path
 )
+
+# Get gradient norm data
+gradient_norms, layer_names = gradient_tracker.get_data()
+
+# Create visualizations
+if metrics_data['eval_steps']:
+    # 1. Training and validation loss curves
+    optimizers_data = {config['optimizer']: metrics_data['train_losses']}
+    plot_seaborn_style(
+        optimizers_data,
+        metrics_data['eval_steps'],
+        "Training Loss vs Step",
+        f"training_loss_{config['optimizer']}",
+        "Loss",
+        visuals_dir,
+        xlabel="Step"
+    )
+    
+    optimizers_data = {config['optimizer']: metrics_data['dev_losses']}
+    plot_seaborn_style(
+        optimizers_data,
+        metrics_data['eval_steps'],
+        "Validation Loss vs Step",
+        f"validation_loss_{config['optimizer']}",
+        "Loss",
+        visuals_dir,
+        xlabel="Step"
+    )
+    
+    # 2. Raw iteration loss curve
+    optimizers_data = {config['optimizer']: metrics_data['iteration_losses']}
+    plot_seaborn_style(
+        optimizers_data,
+        range(len(metrics_data['iteration_losses'])),
+        "Training Loss per Iteration",
+        f"iteration_loss_{config['optimizer']}",
+        "Loss",
+        visuals_dir,
+        xlabel="Iteration"
+    )
+    
+    # 3. Wall time vs loss curve
+    optimizers_data = {config['optimizer']: metrics_data['iteration_losses']}
+    wall_times_data = {config['optimizer']: metrics_data['wall_times']}
+    plot_seaborn_style(
+        optimizers_data,
+        wall_times_data,
+        "Training Loss vs Wall Time",
+        f"walltime_loss_{config['optimizer']}",
+        "Loss",
+        visuals_dir,
+        xlabel="Wall Time (seconds)"
+    )
+    
+    # 4. Gradient norm visualizations
+    grad_norms_data = {config['optimizer']: gradient_norms}
+    layer_names_data = {config['optimizer']: layer_names}
+    visualize_gradient_norms(
+        grad_norms_data,
+        layer_names_data,
+        visuals_dir,
+        f"Transformer Training ({config['optimizer']})"
+    )
+    
+    # Save metrics data to CSV
+    all_metrics = [{
+        'step': step,
+        'train_loss': train_loss,
+        'dev_loss': dev_loss,
+        'optimizer': config['optimizer']
+    } for step, train_loss, dev_loss in zip(
+        metrics_data['eval_steps'], 
+        metrics_data['train_losses'], 
+        metrics_data['dev_losses']
+    )]
+    save_experiment_results(
+        {config['optimizer']: all_metrics},
+        results_dir,
+        f"metrics_{config['optimizer']}.csv"
+    )
+
 print(f"Saved model to {modified_model_out_path}")
 print(f"Finished training. Train loss: {train_loss:.4f}, Dev loss: {dev_loss:.4f}")
+print(f"Visualizations saved to {visuals_dir}")

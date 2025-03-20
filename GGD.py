@@ -560,7 +560,8 @@ class GGD(Optimizer):  # noqa: D101
             param_norm = param.data.norm()
             grad_norm = grad.norm()
             if param_norm > 0 and grad_norm > 0:
-                trust_ratio = param_norm / (grad_norm + weight_decay * param_norm)
+                # Convert tensor to scalar using item()
+                trust_ratio = (param_norm / (grad_norm + weight_decay * param_norm)).item()
             else:
                 trust_ratio = 1.0
 
