@@ -64,39 +64,14 @@ elif optimizer_name == "GGD_LW":
     )
 elif optimizer_name == "GGD_HYBRID":
     optimizer = GGD(
-            model.parameters(),
-            lr=config['t_lr'],
-            normalize=True,
-            layer_wise=True,
-            scale_aware=True,
-            scale_factor=0.2,
-            use_second_moment=True,
-            hybrid_mode=True,
-            second_moment_factor=0.7,  # Favor second moments for LLMs
-            betas=(0.9, 0.999),
-            adamw_mode=True,
-            eps=1e-8,
-            weight_decay=0.01,
-            clip_norm=1.0,
-            lamb=True  # LAMB is essential for transformers - helps with attention layer variations
-        )
+        model.parameters(),
+        **optimizer_params
+    )
 elif optimizer_name == "GGD_ADAM":
-    # Renamed for clarity but functionally equivalent to previous implementation
     optimizer = GGD(
-            model.parameters(),
-            lr=config['t_lr'],
-            normalize=True,
-            layer_wise=True,
-            scale_aware=True, 
-            scale_factor=0.2,
-            use_second_moment=True,  # Previously use_adam
-            betas=(0.9, 0.999),
-            adamw_mode=True,
-            eps=1e-8,
-            weight_decay=0.01,
-            clip_norm=1.0,
-            lamb=True  # Enable LAMB for transformers
-        )
+        model.parameters(),
+        **optimizer_params
+    )
 
 # List to track loss values during training.
 losses = []

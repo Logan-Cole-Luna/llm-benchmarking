@@ -18,37 +18,37 @@ T_TRAIN_STEPS = 1000       # Total number of training steps (reduced from 200000
 T_EVAL_STEPS = 200          # Frequency (in steps) to perform evaluation (reduced from 1000)
 T_EVAL_ITERS = 50           # Number of iterations to evaluate the model (reduced from 250)
 T_LR_DECAY_STEP = 5000      # Step at which to decay the learning rate (reduced from 50000)
-T_LR = 5e-4                 # Initial learning rate for training
+T_LR = 0.03               # Initial learning rate for training
 T_LR_DECAYED = 5e-5         # Learning rate after decay
 T_OUT_PATH = "models/transformer_tiny.pt"  # Path to save the trained model
 
 # List of optimizers to train and compare
-OPTIMIZERS_TO_TRAIN = ["ADAMW", "ADAM", "SGD", "GGD", "GGD_LW", "GGD_HYBRID", "GGD_ADAM"]
+OPTIMIZERS_TO_TRAIN = ["ADAMW", "ADAM", "SGD", "GGD", "GGD_LW"]
 
 # Optimizer configuration
-OPTIMIZER = "GGD_HYBRID"         # Options: "ADAMW", "SGD", "ADAM", "GGD", "GGD_LW", "GGD_HYBRID", "GGD_ADAM"
+OPTIMIZER = "GGD"         # Options: "ADAMW", "SGD", "ADAM", "GGD", "GGD_LW", "GGD_HYBRID", "GGD_ADAM"
 OPTIMIZER_PARAMS = {
     "ADAMW": {"lr": T_LR, "weight_decay": 0.01},
-    "SGD": {"lr": 0.1, "momentum": 0.9, "nesterov": True},
+    "SGD": {"lr": T_LR, "momentum": 0.9, "nesterov": True},
     "ADAM": {"lr": T_LR},
     "GGD": {"normalize": True, "layer_wise": False, "scale_aware": False, 
-            "scale_factor": 0.2, "max_group_size": 5000, "adaptive": True, "clip_norm": 1.0,
-            "momentum": 0.9, "adaptive_eps": 1e-8, "weight_decay": 0.0005, "lamb": True},
+            "max_group_size": 5000, "adaptive": True, "clip_norm": 5.0,
+            "momentum": 0.9, "weight_decay": 0.00}, #, "scale_factor": 0.2," lamb": True, "adaptive_eps": 1e-8},
     #"GGD_LW": {"normalize": True, "layer_wise": True, "scale_aware": True, 
     #           "scale_factor": 0.2, "max_group_size": 5000, "adaptive": True, "clip_norm": 1.0, 
     #           "momentum": 0.9, "adaptive_eps": 1e-8, "weight_decay": 0.0005},
     
     "GGD_LW": {
-        "lr": 0.1,
+        "lr": T_LR,
         "normalize": True,
         "layer_wise": True,
-        "scale_aware": False,
+        "scale_aware": True,
         "max_group_size": 5000,
-        "adaptive": False,
-        "clip_norm": 0,  #// or use a higher value like 5.0 if clipping is desired
+        "adaptive": True,
+        "clip_norm": 5,  #// or use a higher value like 5.0 if clipping is desired
         "momentum": 0.9,
-        "weight_decay": 0.0,
-        "nesterov": True  #// if your implementation supports it
+        "weight_decay": 0.0005,
+        "nesterov": False  #// if your implementation supports it
         },
 
     "GGD_HYBRID": {"lr": T_LR, "normalize": True, "layer_wise": True, "scale_aware": True, 

@@ -64,7 +64,6 @@ def train_with_optimizer(optimizer_name: str) -> Dict[str, Any]:
     elif optimizer_name == "GGD_HYBRID":
         optimizer = GGD(model.parameters(), **optimizer_params)
     elif optimizer_name == "GGD_ADAM":
-        # Renamed for clarity but functionally equivalent to previous implementation
         optimizer = GGD(model.parameters(), **optimizer_params)
     else:
         raise ValueError(f"Unknown optimizer: {optimizer_name}")
